@@ -1,3 +1,24 @@
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.bak
+*.tmp
+*.orig
+*.log
+*.out
+*.pid
+*.seed
+*.pid.lock
+*.pdb
+*.egg-info/
+*.egg
+*.whl
+*.zip
+*.tar.gz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
