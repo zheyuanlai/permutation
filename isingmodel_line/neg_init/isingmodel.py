@@ -2,8 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 d = 50                 # Number of spins
-n_steps = 10000        # Number of MCMC steps
-beta = 1.0             # Inverse temperature
+n_steps = 100000       # Number of MCMC steps
+beta = 2.0             # Inverse temperature
 
 np.random.seed(42)
 
@@ -90,40 +90,34 @@ plt.tight_layout()
 plt.savefig('ising_model_energy.png')
 plt.show()
 
-# Smoothing the data
+def autocorr(x, max_lag=1000):
+    x = x - np.mean(x)
+    result = np.correlate(x, x, mode='full')
+    result = result[result.size // 2:]
+    return result[:max_lag] / result[0]
 
-def moving_average(data, window_size=50):
-    """
-    Compute the moving average of 'data' with a specified window_size.
-    """
-    return np.convolve(data, np.ones(window_size), 'valid') / window_size
-
-window_size = 50
-smooth_mag_std = moving_average(mag_std, window_size)
-smooth_mag_mod = moving_average(mag_mod, window_size)
-smooth_energy_std = moving_average(energy_std, window_size)
-smooth_energy_mod = moving_average(energy_mod, window_size)
-
-smoothed_steps = np.arange(len(smooth_mag_std))
+max_lag = 1000
+ac_std = autocorr(mag_std, max_lag)
+ac_mod = autocorr(mag_mod, max_lag)
 
 plt.figure(figsize=(8, 5))
-plt.plot(smoothed_steps, smooth_mag_std, label='Standard MH (smoothed)')
-plt.plot(smoothed_steps, smooth_mag_mod, label='Projection Sampler (smoothed)')
-plt.xlabel('MCMC Step')
-plt.ylabel('Magnetization')
-plt.title('Magnetization vs. Time (Smoothed)')
+plt.plot(ac_std, label='Standard MH')
+plt.plot(ac_mod, label='Projection Sampler')
+plt.xlabel('Lag')
+plt.ylabel('Autocorrelation')
+plt.title('Autocorrelation of Magnetization')
 plt.legend()
 plt.tight_layout()
-plt.savefig('ising_model_magnetization_smoothed.png')
+plt.savefig('ising_autocorrelation.png')
 plt.show()
 
 plt.figure(figsize=(8, 5))
-plt.plot(smoothed_steps, smooth_energy_std, label='Standard MH (smoothed)')
-plt.plot(smoothed_steps, smooth_energy_mod, label='Projection Sampler (smoothed)')
-plt.xlabel('MCMC Step')
-plt.ylabel('Hamiltonian H(x)')
-plt.title('Energy vs. Time (Smoothed)')
+plt.hist(mag_std[-100000:], bins=30, alpha=0.5, label='Standard MH $P$', density=True)
+plt.hist(mag_mod[-100000:], bins=30, alpha=0.5, label='Projection Sampler $\dfrac{1}{2}(P+QPQ)$', density=True)
+plt.xlabel('Magnetization')
+plt.ylabel('Density')
+plt.title('Histogram of Magnetization (last 5000 steps)')
 plt.legend()
 plt.tight_layout()
-plt.savefig('ising_model_energy_smoothed.png')
+plt.savefig('ising_histogram.png')
 plt.show()
