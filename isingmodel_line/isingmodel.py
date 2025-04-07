@@ -34,20 +34,18 @@ def Q_permutation(x):
 
 def metropolis_step_modified(x):
     """
-    One step of the projection sampler P(Q) = 1/2 (P + Q P Q).
-    This is simulated by choosing a random permutation sigma in {identity, Q}
-    and then:
-       y' ~ P(sigma(x))
-       return sigma(y')
+    Projection sampler P(Q) = 1/2 (P + Q P Q).
+    We implement by setting:
+       y1 = P(x)
+       y2 = Q(P(Q(x)))
+    and then choose between y1 and y2 with equal probability.
     """
+    y1 = metropolis_step(x)
+    y2 = Q_permutation(metropolis_step(Q_permutation(x)))
     if np.random.rand() < 0.5:
-        sigma = lambda z: z
+        return y1
     else:
-        sigma = Q_permutation
-    x_perm = sigma(x)
-    y_prime = metropolis_step(x_perm)
-    y_new = sigma(y_prime)
-    return y_new
+        return y2
 
 def magnetization(x):
     """Compute the magnetization (average spin) of state x."""
