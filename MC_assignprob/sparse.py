@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from ortools.linear_solver import pywraplp
 from scipy.sparse import csr_matrix
+#from numba import njit  # Uncomment if you wish to use Numba further
 
 # ===============================
 # Utility functions for the Ising model
@@ -38,22 +39,22 @@ def simulate_chain_states(d, beta, num_steps, initial_state):
     """
     state_dict = {}  # Map state (as tuple) -> index
     states_list = []  # List of visited states (as numpy arrays)
-    
+
     def add_state(state):
         t_state = tuple(state)
         if t_state not in state_dict:
             state_dict[t_state] = len(states_list)
             states_list.append(state.copy())
-    
+
     current_state = initial_state.copy()
     add_state(current_state)
     chain_indices = [state_dict[tuple(current_state)]]
-    
+
     for _ in range(num_steps):
         current_state = metropolis_transition(current_state, beta)
         add_state(current_state)
         chain_indices.append(state_dict[tuple(current_state)])
-        
+
     return np.array(chain_indices), states_list
 
 # ===============================
@@ -68,10 +69,10 @@ def build_sparse_P(states_list, beta):
     n = len(states_list)
     d = len(states_list[0])
     rows, cols, data = [], [], []
-    
+
     # For fast lookup of states, build a dictionary from state tuple to index.
     state_to_index = {tuple(state): i for i, state in enumerate(states_list)}
-    
+
     for i, state in enumerate(states_list):
         total_prob = 0.0
         # Consider each single-spin flip neighbor.
@@ -89,121 +90,97 @@ def build_sparse_P(states_list, beta):
                 cols.append(k)
                 data.append(prob)
                 total_prob += prob
-        # Self-loop to account for rejected moves.
+        # Self-loop for rejected moves.
         rows.append(i)
         cols.append(i)
         data.append(1 - total_prob)
-    
+
     P_sparse = csr_matrix((data, (rows, cols)), shape=(n, n))
     return P_sparse
 
 # ===============================
-# Assignment problem and cost function
+# Vectorized KL divergence computation
 # ===============================
-def KL_divergence(P, Q):
+def kl_divergence(P, Q):
     """
-    Compute the KL divergence D_KL^π(P || Q) using the stationary distribution.
-    For demonstration we assume the stationary distribution is uniform on the visited states.
+    Compute the KL divergence D_KL^pi(P || Q) assuming a uniform stationary distribution.
+    Both P and Q are assumed to be dense numpy arrays.
+    The sum is taken only over the nonzero elements of P.
     """
     n = P.shape[0]
     pi = np.ones(n) / n  # uniform stationary distribution
-    kl_div = 0.0
-    for x in range(n):
-        for y in range(n):
-            p_val = P[x, y]
-            q_val = Q[x, y]
-            if p_val > 0 and q_val > 0:
-                kl_div += pi[x] * p_val * np.log(p_val / q_val)
-    return kl_div
+    # Get indices of nonzero elements in P.
+    idx_x, idx_y = np.nonzero(P)
+    # Avoid division by zero: only include entries where Q > 0.
+    valid = (Q[idx_x, idx_y] > 0)
+    terms = pi[idx_x[valid]] * P[idx_x[valid], idx_y[valid]] * np.log(P[idx_x[valid], idx_y[valid]] / Q[idx_x[valid], idx_y[valid]])
+    return np.sum(terms)
 
 def compute_cost(P, psi, gamma=0.1):
     """
-    Given a permutation psi (represented as a list where psi[i] is the index that state i is mapped to),
-    compute the cost as: -KL_divergence(P, P_bar) - gamma*(# of swaps). Here, P_bar = 1/2(P + QPQ),
-    where Q is induced by psi.
+    Given a permutation psi (as a list of indices, where psi[i] is the image of i),
+    compute the cost as: -KL_divergence(P, P_bar) - gamma * (# of swaps).
+    Here, P_bar = 0.5*(P + QP Q) and Q is applied via reindexing.
     """
     n = P.shape[0]
-    # Build permutation matrix Q explicitly from psi (sparse in nature—only one 1 per row)
-    Q = np.zeros((n, n))
-    for i in range(n):
-        Q[i, psi[i]] = 1
-    P_bar = 0.5 * (P + Q @ P @ Q)
+    # Instead of constructing Q explicitly, compute P_perm = P[psi, :][:, psi].
+    P_perm = P[psi, :][:, psi]
+    P_bar = 0.5 * (P + P_perm)
     swaps = sum(1 for i in range(n) if psi[i] != i)
-    num_swaps = swaps / 2.0  # each swap counts twice
-    return -KL_divergence(P, P_bar) - gamma * num_swaps
+    num_swaps = swaps / 2.0
+    return -kl_divergence(P, P_bar)
 
-def solve_assignment(P):
-    """
-    Here we assume that we want to decide a swap for each pair (or leave as identity).
-    For demonstration, we restrict to considering only pairs (i,j) with i <= j.
-    The cost matrix is built using compute_cost for the swap that exchanges i and j (if i != j)
-    or keeps state i fixed (if i == j).
-    """
+def solve_assignment(P, energies):
     n = P.shape[0]
-    cost_matrix = np.zeros((n, n))
-    # Build cost matrix. For each pair (i, j) consider the permutation that swaps i and j.
+    # Precompute Boltzmann weights π_i ∝ exp(-β H_i) if you prefer,
+    # but equi-energy means energies[i]==energies[j].
+    allowed = []
     for i in range(n):
         for j in range(i, n):
-            psi = list(range(n))
-            if i != j:
-                psi[i], psi[j] = psi[j], psi[i]
-            cost_matrix[i, j] = compute_cost(P, psi)
-            cost_matrix[j, i] = cost_matrix[i, j]
-    
-    solver = pywraplp.Solver.CreateSolver('SCIP')
-    if solver is None:
-        print("Failed to create solver.")
-        return None
+            if i==j or energies[i]==energies[j]:
+                allowed.append((i,j))
 
-    x_vars = {}
-    for i in range(n):
-        for j in range(i, n):
-            x_vars[(i, j)] = solver.BoolVar(f'x_{i}_{j}')
-    
-    # Each state i must appear in exactly one chosen pair.
+    # Build cost only for allowed swaps
+    cost = {(i,j):None for i,j in allowed}
+    for (i,j) in allowed:
+        psi = list(range(n))
+        if i!=j:
+            psi[i],psi[j]=psi[j],psi[i]
+        Pp = P[psi,:][:,psi]    # apply permutation via reindexing
+        Pbar = 0.5*(P + Pp)
+        cost[(i,j)] = -kl_divergence(P, Pbar)
+
+    # Set up SCIP solver
+    solver = pywraplp.Solver.CreateSolver('SCIP')
+    x = {}
+    for (i,j) in allowed:
+        x[(i,j)] = solver.BoolVar(f"x_{i}_{j}")
+
+    # Each state i must be in exactly one pair
     for i in range(n):
         terms = []
-        for j in range(i, n):
-            terms.append(x_vars[(i, j)])
-        for j in range(0, i):
-            terms.append(x_vars[(j, i)])
+        for (a,b) in allowed:
+            if a==i or b==i:
+                terms.append(x[(a,b)])
         solver.Add(solver.Sum(terms) == 1)
-    
-    objective_terms = []
-    for i in range(n):
-        for j in range(i, n):
-            objective_terms.append(cost_matrix[i, j] * x_vars[(i, j)])
-    solver.Minimize(solver.Sum(objective_terms))
-    
+
+    # Objective: minimize total cost
+    obj = solver.Sum(cost[(i,j)] * x[(i,j)] for (i,j) in allowed)
+    solver.Minimize(obj)
+
     status = solver.Solve()
     if status != pywraplp.Solver.OPTIMAL:
-        print("Solver did not find an optimal solution.")
-        return None
-    
-    psi = [None] * n
-    for i in range(n):
-        for j in range(i, n):
-            if x_vars[(i, j)].solution_value() > 0.5:
-                if i == j:
-                    psi[i] = i
-                else:
-                    psi[i] = j
-                    psi[j] = i
+        raise RuntimeError("No optimal solution")
+
+    # Recover psi
+    psi = list(range(n))
+    for (i,j) in allowed:
+        if x[(i,j)].solution_value() > 0.5 and i!=j:
+            psi[i], psi[j] = j, i
     return psi
 
-def construct_Q(psi):
-    """
-    Construct the permutation matrix Q from the permutation vector psi.
-    (For the projected sampler we need Q to compute QPQ.)
-    """
-    n = len(psi)
-    Q = np.zeros((n, n))
-    for i in range(n):
-        Q[i, psi[i]] = 1
-    return Q
-
 # ===============================
-# Simulate chains using the (dense) transition matrices from the visited set.
+# Simulation functions (using dense matrices for the visited set)
 # ===============================
 def sample_next_state(current_index, P_dense):
     """Given the current state index and transition matrix P_dense (as a dense array), sample the next state index."""
@@ -221,20 +198,17 @@ def compute_magnetization_chain(chain, states_list):
     """
     For each visited state (indexed by chain), compute the magnetization (average spin).
     """
-    mags = []
-    for idx in chain:
-        state = states_list[idx]
-        mags.append(np.mean(state))
+    mags = [np.mean(states_list[idx]) for idx in chain]
     return np.array(mags)
 
 # ===============================
 # Main demonstration code
 # ===============================
 if __name__ == '__main__':
-    # Set parameters. For d=50, we cannot enumerate 2^50 states.
-    d = 20
-    beta = 2.5
-    num_steps = 10000  # Use this many steps to build a representative visited state set.
+    # Set parameters. For example, for d=20 we cannot enumerate all 2^20 states but we simulate a subset.
+    d = 25
+    beta = 2
+    num_steps = 20000  # More steps yields a larger visited state set.
     initial_state = np.ones(d, dtype=int)  # Start with all spins +1.
 
     # Simulate a chain and record the visited states.
@@ -243,19 +217,20 @@ if __name__ == '__main__':
     
     # Build a sparse transition matrix for the visited states.
     P_sparse = build_sparse_P(states_list, beta)
-    # For assignment and simulation purposes, convert to dense.
+    # For assignment and simulation purposes, convert to a dense matrix on this small subset.
     P_dense = P_sparse.toarray()
-    print("Built P_sparse and P_dense.")
+    print("Built P_sparse and converted to P_dense.")
     
-    # Solve the assignment problem (over the visited states) to choose an optimal permutation.
-    psi_opt = solve_assignment(P_dense)
+    # Solve the assignment problem (over the visited states) to select an optimal permutation.
+    psi_opt = solve_assignment(P_dense, np.array([hamiltonian(s) for s in states_list]))
     print("Optimal permutation psi:", psi_opt)
     
-    # Build Q from the optimal permutation and form the projected sampler:
-    Q_opt = construct_Q(psi_opt)
-    P_bar = 0.5 * (P_dense + Q_opt @ P_dense @ Q_opt)
+    # Instead of constructing a dense permutation matrix, use the permutation vector directly:
+    # Compute QPQ by reindexing: P_perm = P_dense[psi_opt, :][:, psi_opt]
+    P_perm = P_dense[psi_opt, :][:, psi_opt]
+    P_bar = 0.5 * (P_dense + P_perm)
     
-    # Simulate two chains: one using the original sampler, one using the projected sampler.
+    # Simulate two chains: one using the original sampler P_dense, one using the projected sampler P_bar.
     sim_steps = 100000
     initial_index = 0  # Start from the same visited state.
     chain_original = simulate_chain(P_dense, sim_steps, initial_index)
